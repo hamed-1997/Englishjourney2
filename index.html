@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ENGLISH JOURNEY</title>
+  <meta name="theme-color" content="#0BA79E">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://js.puter.com/v2/"></script>
+</head>
+<body>
+
+  <!-- Branded splash — shown briefly on launch -->
+  <div id="splash">
+    <div class="splash-lockup">
+      <div class="splash-icon-box" id="splashIconBox">
+        <img class="splash-icon-base" src="assets/splash-icon.png" alt="">
+        <svg class="splash-glow-svg" viewBox="0 0 298 354" preserveAspectRatio="xMidYMid meet">
+          <circle class="splash-glow" id="splashGlow" r="5.5" cx="0" cy="0"/>
+        </svg>
+        <img class="splash-plane" id="splashPlane" src="assets/splash-plane.png" alt="">
+      </div>
+      <div class="splash-text-box" id="splashTextBox">
+        <img class="splash-text-img" src="assets/splash-text.png" alt="English Journey">
+      </div>
+    </div>
+  </div>
+
+  <header class="app-header">
+    <div class="brand">
+      <img class="brand-mark" src="assets/logo.png" alt="">
+      <div class="brand-wordmark"><span class="w1">English</span><span class="w2">Journey</span></div>
+    </div>
+    <div class="header-view-title" id="header-view-title">Home</div>
+  </header>
+
+  <main>
+    <section id="view-today" class="view active"></section>
+    <section id="view-journey" class="view"></section>
+    <section id="view-progress" class="view"></section>
+    <section id="view-resources" class="view"></section>
+    <section id="view-settings" class="view"></section>
+  </main>
+
+  <button class="victor-fab" id="victor-fab" aria-label="Chat with Victor">
+    <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="8" r="4.2"></circle>
+      <path d="M4.5 20.5c0-4.1 3.4-7 7.5-7s7.5 2.9 7.5 7"></path>
+    </svg>
+  </button>
+
+  <nav class="bottom-nav">
+    <button class="nav-btn active" data-view="today">
+      <svg viewBox="0 0 24 24"><path d="M3.5 11.5 12 4l8.5 7.5"></path><path d="M5.5 10v9.2a.8.8 0 0 0 .8.8H9a.8.8 0 0 0 .8-.8V15a.8.8 0 0 1 .8-.8h2.8a.8.8 0 0 1 .8.8v4.2a.8.8 0 0 0 .8.8h2.7a.8.8 0 0 0 .8-.8V10"></path></svg>
+      Home
+    </button>
+    <button class="nav-btn" data-view="journey">
+      <svg viewBox="0 0 24 24"><path d="M4 20c3-8 5-4 7-10s4-4 9-6"></path><path d="M4 20c1.5-1 3-1 4.5 0" stroke-dasharray="0.1 3.2"></path><circle cx="20" cy="4" r="1.6" class="fill-part"></circle></svg>
+      Journey
+    </button>
+    <button class="nav-btn" data-view="progress">
+      <svg viewBox="0 0 24 24"><path d="M4 20V10"></path><path d="M11 20V4"></path><path d="M18 20v-7"></path><path d="M3 20h18"></path></svg>
+      Progress
+    </button>
+    <button class="nav-btn" data-view="resources">
+      <svg viewBox="0 0 24 24"><path d="M7 4h8l4 4v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"></path><path d="M14.5 4v4.5H19"></path></svg>
+      Resources
+    </button>
+    <button class="nav-btn" data-view="settings">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 13.5a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V20a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H4a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3H10.5a1.7 1.7 0 0 0 1-1.6V4a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9V10.5a1.7 1.7 0 0 0 1.6 1H20a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.6 1z"></path></svg>
+      Settings
+    </button>
+  </nav>
+
+  <div class="success-overlay" id="success-overlay">
+    <div class="confetti-container" id="confetti-container"></div>
+    <div class="success-badge">
+      <svg class="check-ring" viewBox="0 0 64 64">
+        <circle class="check-ring-bg" cx="32" cy="32" r="28"></circle>
+        <circle class="check-ring-fg" cx="32" cy="32" r="28"></circle>
+        <path class="check-mark" d="M20 33 L28 41 L45 23"></path>
+      </svg>
+      <div class="msg" id="success-msg">Nice work!</div>
+      <div class="submsg" id="success-submsg"></div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modal-backdrop"></div>
+
+  <!-- Victor AI chat -->
+  <div class="chat-overlay" id="chat-overlay">
+    <div class="chat-header">
+      <div class="victor-avatar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="8" r="4.2"></circle>
+          <path d="M4.5 20.5c0-4.1 3.4-7 7.5-7s7.5 2.9 7.5 7"></path>
+        </svg>
+      </div>
+      <div>
+        <div class="name">Victor</div>
+        <div class="status" id="chat-status">Your English coach</div>
+      </div>
+      <button class="chat-close" id="chat-close">✕</button>
+    </div>
+    <div class="chat-messages" id="chat-messages"></div>
+    <div class="chat-input-row" id="chat-input-row">
+      <input type="text" id="chat-input" placeholder="Ask Victor anything about English...">
+      <button class="chat-send" id="chat-send">➤</button>
+    </div>
+  </div>
+
+  <script src="js/curriculum-data.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
