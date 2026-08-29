@@ -7,7 +7,7 @@
 // Storage
 // ---------------------------------------------------------------
 const STORE_KEY = "ej_state_v1";
-const APP_VERSION = "2026.08.27b";
+const APP_VERSION = "2026.08.28";
 
 // Seeded default resources — real, verified, free tools (not placeholders).
 // The user can edit or delete any of these; this just means Resources isn't empty on day one.
@@ -38,6 +38,7 @@ function defaultState() {
     streak: 0,
     bestStreak: 0,
     lastCompletionDate: null,     // ISO date string (yyyy-mm-dd) of last day completion
+    startDate: null,              // ISO date the journey started — anchors the one-day-per-day pace
     restDay: "Friday",
     resources: DEFAULT_RESOURCES.map(r => ({ ...r })),   // {id, title, link, type}
     settings: {
@@ -82,6 +83,39 @@ const WEEKDAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","S
 function todayIsRestDay() {
   const idx = new Date().getDay();
   return WEEKDAYS[idx] === state.restDay;
+}
+
+// Ensures the journey has a start date to pace itself against. Called once on init.
+function ensureStartDate() {
+  if (!state.startDate) {
+    state.startDate = todayISO();
+    saveState();
+  }
+}
+
+// How many curriculum days the calendar allows by today, counting from
+// startDate and skipping the weekly rest day — this is what makes the app
+// "one lesson per day" by default, while still letting a learner who missed
+// days catch back up (they're simply behind this number, not blocked by it).
+function expectedDayByToday() {
+  if (!state.startDate) return 1;
+  const start = new Date(state.startDate + "T00:00:00");
+  const end = new Date(todayISO() + "T00:00:00");
+  let count = 0;
+  const d = new Date(start);
+  while (d <= end) {
+    if (WEEKDAYS[d.getDay()] !== state.restDay) count++;
+    d.setDate(d.getDate() + 1);
+  }
+  return Math.max(1, Math.min(count, 180));
+}
+
+// True once the learner has already used up today's allotted lesson and is
+// not behind schedule — i.e. they'd be rushing ahead of the calendar pace.
+function isPaceLockedToday() {
+  if (state.completedDays.length === 0) return false; // never block the very first lesson
+  if (todayIsRestDay()) return false; // rest-day screen already handles this
+  return state.currentDay > expectedDayByToday();
 }
 
 // ---------------------------------------------------------------
@@ -521,6 +555,11 @@ function renderToday() {
   const doneCount = state.completedStepsToday.length;
   const allDone = doneCount >= steps.length;
 
+  if (!allDone && doneCount === 0 && isPaceLockedToday()) {
+    renderPaceLockedView();
+    return;
+  }
+
   let victorMsg = dayData.isCheckpoint
     ? `Checkpoint day — no new material. Let's connect what you've learned across the last few stages into one real conversation.`
     : dayData.isChallenge
@@ -553,6 +592,35 @@ function renderToday() {
   if (startBtn) startBtn.onclick = () => openSessionRunner(dayData, steps);
   const nextBtn = document.getElementById("btn-continue-next");
   if (nextBtn) nextBtn.onclick = () => { renderToday(); };
+}
+
+// Shown once today's single lesson is done and the learner isn't behind
+// schedule — keeps the app to one lesson per calendar day by default, while
+// offering unlimited extra speaking practice on today's topic with Victor.
+function renderPaceLockedView() {
+  const el = document.getElementById("view-today");
+  const lastDay = getDayData(Math.max(1, state.currentDay - 1)) || getDayData(1);
+  el.innerHTML = `
+    ${heroHTML(lastDay)}
+    ${victorRowHTML(`Nice work today. Tomorrow's lesson unlocks after midnight — no rush. Want to keep practicing "${lastDay.topic}" with me in the meantime?`)}
+    <div class="mission-section center" style="padding-top:10px;">
+      <span class="tag done">✓ Today's lesson complete</span>
+      <p class="mt8" style="font-size:15px; font-weight:700;">Day ${lastDay.day + 1} unlocks tomorrow</p>
+      <p class="muted small">Missed a day recently? Opening the app again after midnight will let you catch up automatically.</p>
+      <button class="btn btn-primary mt16" id="btn-extra-practice">Practice More with Victor</button>
+    </div>
+  `;
+  const extraBtn = document.getElementById("btn-extra-practice");
+  if (extraBtn) extraBtn.onclick = () => openExtraPractice(lastDay);
+}
+
+function openExtraPractice(dayData) {
+  openVictorChat();
+  const input = document.getElementById("chat-input");
+  if (input) {
+    input.value = `Can we do some extra speaking practice about "${dayData.topic}"? Ask me questions and correct my mistakes gently.`;
+    input.focus();
+  }
 }
 
 function heroHTML(dayData) {
@@ -1315,6 +1383,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Enter") sendChatMessage();
   });
 
+  ensureStartDate();
   switchView("today");
   checkPuterAuthOnLoad();
 
