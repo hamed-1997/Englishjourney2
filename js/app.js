@@ -7,7 +7,7 @@
 // Storage
 // ---------------------------------------------------------------
 const STORE_KEY = "ej_state_v1";
-const APP_VERSION = "2026.08.28";
+const APP_VERSION = "2026.08.28b";
 
 // Seeded default resources — real, verified, free tools (not placeholders).
 // The user can edit or delete any of these; this just means Resources isn't empty on day one.
@@ -38,7 +38,8 @@ function defaultState() {
     streak: 0,
     bestStreak: 0,
     lastCompletionDate: null,     // ISO date string (yyyy-mm-dd) of last day completion
-    startDate: null,              // ISO date the journey started — anchors the one-day-per-day pace
+    lessonCredits: null,           // null = not yet initialized; otherwise, lessons the learner can start right now
+    lastCreditGrantDate: null,     // last local date credits were granted for
     restDay: "Friday",
     resources: DEFAULT_RESOURCES.map(r => ({ ...r })),   // {id, title, link, type}
     settings: {
@@ -85,37 +86,44 @@ function todayIsRestDay() {
   return WEEKDAYS[idx] === state.restDay;
 }
 
-// Ensures the journey has a start date to pace itself against. Called once on init.
-function ensureStartDate() {
-  if (!state.startDate) {
-    state.startDate = todayISO();
-    saveState();
-  }
-}
+// Grants any lesson-credits the learner has earned since we last checked —
+// one credit per eligible (non-rest) calendar day, using the LOCAL date. This
+// recomputes fresh on every check, so it self-heals from any stale/incorrect
+// data rather than trusting a single fixed "start date" forever.
+function grantDueCredits() {
+  const today = todayISO();
+  if (state.lastCreditGrantDate === today) return;
 
-// How many curriculum days the calendar allows by today, counting from
-// startDate and skipping the weekly rest day — this is what makes the app
-// "one lesson per day" by default, while still letting a learner who missed
-// days catch back up (they're simply behind this number, not blocked by it).
-function expectedDayByToday() {
-  if (!state.startDate) return 1;
-  const start = new Date(state.startDate + "T00:00:00");
-  const end = new Date(todayISO() + "T00:00:00");
-  let count = 0;
-  const d = new Date(start);
+  if (state.lessonCredits === null) {
+    // First run (or migrating from an older version) — unlock exactly one
+    // lesson right now rather than trying to reconstruct history.
+    state.lessonCredits = 1;
+    state.lastCreditGrantDate = today;
+    saveState();
+    return;
+  }
+
+  const from = new Date(state.lastCreditGrantDate + "T00:00:00");
+  from.setDate(from.getDate() + 1);
+  const end = new Date(today + "T00:00:00");
+  let granted = 0;
+  const d = new Date(from);
   while (d <= end) {
-    if (WEEKDAYS[d.getDay()] !== state.restDay) count++;
+    if (WEEKDAYS[d.getDay()] !== state.restDay) granted++;
     d.setDate(d.getDate() + 1);
   }
-  return Math.max(1, Math.min(count, 180));
+  state.lessonCredits += granted;
+  state.lastCreditGrantDate = today;
+  saveState();
 }
 
-// True once the learner has already used up today's allotted lesson and is
-// not behind schedule — i.e. they'd be rushing ahead of the calendar pace.
+// True once the learner has used up today's allotted lesson(s) — i.e.
+// starting another one now would be rushing ahead of the calendar pace.
 function isPaceLockedToday() {
   if (state.completedDays.length === 0) return false; // never block the very first lesson
   if (todayIsRestDay()) return false; // rest-day screen already handles this
-  return state.currentDay > expectedDayByToday();
+  grantDueCredits();
+  return (state.lessonCredits || 0) <= 0;
 }
 
 // ---------------------------------------------------------------
@@ -407,8 +415,21 @@ function buildCheckpointSteps(dayData) {
 // ---------------------------------------------------------------
 // Progress / streak logic
 // ---------------------------------------------------------------
+// Local calendar date (NOT UTC — toISOString() would shift the date during
+// the gap between local midnight and UTC midnight, e.g. 00:00-03:30 in Iran).
 function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function isoDateFor(dateObj) {
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, "0");
+  const day = String(dateObj.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 function completeDay(dayNum) {
@@ -418,7 +439,7 @@ function completeDay(dayNum) {
   const today = todayISO();
   const y = new Date();
   y.setDate(y.getDate() - 1);
-  const yesterday = y.toISOString().slice(0, 10);
+  const yesterday = isoDateFor(y);
 
   if (state.lastCompletionDate === today) {
     // already completed a day today (edge case) — streak unchanged
@@ -430,6 +451,7 @@ function completeDay(dayNum) {
   }
   state.lastCompletionDate = today;
   if (state.streak > state.bestStreak) state.bestStreak = state.streak;
+  state.lessonCredits = Math.max(0, (state.lessonCredits || 0) - 1);
 
   state.currentDay = Math.min(dayNum + 1, 180);
   state.stepIndex = 0;
@@ -1383,7 +1405,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Enter") sendChatMessage();
   });
 
-  ensureStartDate();
+  grantDueCredits();
   switchView("today");
   checkPuterAuthOnLoad();
 
