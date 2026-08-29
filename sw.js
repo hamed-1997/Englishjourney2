@@ -1,4 +1,4 @@
-const CACHE = "english-journey-v5";
+const CACHE = "english-journey-v6";
 const ASSETS = [
   "./",
   "./index.html",
