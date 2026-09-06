@@ -7,7 +7,7 @@
 // Storage
 // ---------------------------------------------------------------
 const STORE_KEY = "ej_state_v1";
-const APP_VERSION = "2026.08.28b";
+const APP_VERSION = "2026.09.06";
 
 // Seeded default resources — real, verified, free tools (not placeholders).
 // The user can edit or delete any of these; this just means Resources isn't empty on day one.
@@ -46,7 +46,16 @@ function defaultState() {
       puterConnected: false,
       model: "gpt-4o-mini"
     },
-    victorChat: []             // {role: "user"|"victor", content}
+    victorChat: [],            // {role: "user"|"victor", content}
+    userName: "",              // shown as author credit on the generated book
+    bookIntro: null,           // {text, approved}
+    stageBooklets: {},         // { [stageNum]: {vocabulary:[...], reading:{title,text}, generatedDate} }
+    stageQuizzes: {},          // { [stageNum]: {questions:[...], completed, score, total} }
+    bookSettings: {
+      font: "helvetica",       // "helvetica" | "times"
+      fontSizeScale: 1,        // 1 = normal, 1.15 = large
+      extraInstructions: ""    // free-text, appended to the chapter-generation prompt
+    }
   };
 }
 
@@ -466,19 +475,53 @@ function percentComplete() {
 // ---------------------------------------------------------------
 // Navigation
 // ---------------------------------------------------------------
-const VIEW_TITLES = { today: "Home", journey: "Journey", progress: "Progress", resources: "Resources", settings: "Settings" };
+const VIEW_TITLES = { today: "Home", journey: "Journey", progress: "Progress", more: "More", resources: "Resources", book: "My Book", "book-settings": "Book Settings", settings: "Settings" };
+const MORE_SUBVIEWS = ["resources", "book", "book-settings"];
 
 function switchView(name) {
   document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
   document.getElementById("view-" + name).classList.add("active");
-  document.querySelectorAll(".nav-btn").forEach(b => b.classList.toggle("active", b.dataset.view === name));
+  document.querySelectorAll(".nav-btn").forEach(b => {
+    const isMatch = b.dataset.view === name || (b.dataset.view === "more" && MORE_SUBVIEWS.includes(name));
+    b.classList.toggle("active", isMatch);
+  });
   document.getElementById("header-view-title").textContent = VIEW_TITLES[name] || "";
   if (name === "today") renderToday();
   if (name === "journey") renderJourney();
   if (name === "progress") renderProgress();
+  if (name === "more") renderMore();
   if (name === "resources") renderResources();
+  if (name === "book") renderBookView();
+  if (name === "book-settings") renderBookSettings();
   if (name === "settings") renderSettings();
   window.scrollTo(0, 0);
+}
+
+function backRowHTML(toView, label) {
+  return `<button class="back-row" data-back="${toView}">← ${label}</button>`;
+}
+function wireBackRow(el) {
+  const btn = el.querySelector("[data-back]");
+  if (btn) btn.onclick = () => switchView(btn.dataset.back);
+}
+
+function renderMore() {
+  const el = document.getElementById("view-more");
+  el.innerHTML = `
+    <div class="card" style="padding:6px 12px;">
+      <div class="row more-row" data-go="resources">
+        <div class="row-title">Resources</div>
+        <div class="chevron">›</div>
+      </div>
+      <div class="row more-row" data-go="book">
+        <div class="row-title">My Book</div>
+        <div class="chevron">›</div>
+      </div>
+    </div>
+  `;
+  el.querySelectorAll(".more-row").forEach(row => {
+    row.onclick = () => switchView(row.dataset.go);
+  });
 }
 
 // Measure a point (and tangent angle) along an SVG path definition, at a given
@@ -573,6 +616,12 @@ function renderToday() {
     return;
   }
 
+  const pendingStage = pendingQuizStage();
+  if (pendingStage) {
+    renderStageQuizGate(pendingStage);
+    return;
+  }
+
   const steps = buildSteps(dayData);
   const doneCount = state.completedStepsToday.length;
   const allDone = doneCount >= steps.length;
@@ -643,6 +692,135 @@ function openExtraPractice(dayData) {
     input.value = `Can we do some extra speaking practice about "${dayData.topic}"? Ask me questions and correct my mistakes gently.`;
     input.focus();
   }
+}
+
+// ---------------------------------------------------------------
+// Stage Quiz gate — shown between finishing Stage N and starting Stage N+1
+// ---------------------------------------------------------------
+function renderStageQuizGate(stageNum) {
+  const el = document.getElementById("view-today");
+  const stage = CURRICULUM_STAGES.find(s => s.stage === stageNum);
+  const connected = !!state.settings.puterConnected;
+  const quiz = state.stageQuizzes[stageNum];
+
+  el.innerHTML = `
+    ${victorRowHTML(`Before Stage ${stageNum + 1}, let's check what stuck from "${stage.theme}" — six quick questions, no pressure.`)}
+    <div class="mission-section center" style="padding-top:10px;">
+      <span class="tag accent">🧠 Stage ${stageNum} Quiz</span>
+      <p class="mt8" style="font-size:15px; font-weight:700;">${stage.theme}</p>
+      ${!connected ? `
+        <p class="muted small">Connect Puter in Settings for a quick quiz — or skip for now.</p>
+        <button class="btn btn-outline mt16" id="btn-skip-quiz">Skip for now</button>
+      ` : quiz?.error ? `
+        <p class="small" style="color:#DC2626;">Couldn't build the quiz. Try again, or skip.</p>
+        <button class="btn btn-primary mt16" id="btn-start-quiz">Try Again</button>
+        <button class="btn btn-outline mt8" id="btn-skip-quiz">Skip for now</button>
+      ` : `
+        <p class="muted small">Six multiple-choice questions on this stage's grammar and vocabulary.</p>
+        <button class="btn btn-primary mt16" id="btn-start-quiz">${quiz?.questions ? "Continue Quiz" : "Start Quiz"}</button>
+        <button class="btn btn-outline mt8" id="btn-skip-quiz">Skip for now</button>
+      `}
+    </div>
+  `;
+
+  const startBtn = document.getElementById("btn-start-quiz");
+  if (startBtn) startBtn.onclick = () => runStageQuiz(stageNum);
+  const skipBtn = document.getElementById("btn-skip-quiz");
+  if (skipBtn) skipBtn.onclick = () => {
+    state.stageQuizzes[stageNum] = state.stageQuizzes[stageNum] || {};
+    state.stageQuizzes[stageNum].completed = true;
+    state.stageQuizzes[stageNum].skipped = true;
+    saveState();
+    renderToday();
+  };
+}
+
+async function runStageQuiz(stageNum) {
+  const el = document.getElementById("view-today");
+  let quiz = state.stageQuizzes[stageNum];
+
+  if (!quiz || !quiz.questions) {
+    el.innerHTML = `
+      <div class="card center">
+        <div class="chat-bubble victor typing" style="margin:20px auto;"><span></span><span></span><span></span></div>
+        <p class="muted small">Victor is putting the quiz together…</p>
+      </div>`;
+    try {
+      quiz = await generateStageQuiz(stageNum);
+    } catch (e) {
+      state.stageQuizzes[stageNum] = { ...(state.stageQuizzes[stageNum] || {}), error: true };
+      saveState();
+      renderStageQuizGate(stageNum);
+      return;
+    }
+  }
+
+  let idx = 0;
+  let correctCount = 0;
+  const answers = [];
+
+  function renderQuestion() {
+    const q = quiz.questions[idx];
+    const dots = quiz.questions.map((_, i) => {
+      const cls = i < idx ? "done" : (i === idx ? "current" : "");
+      return `<div class="step-dot ${cls}"></div>`;
+    }).join("");
+
+    el.innerHTML = `
+      <div class="card">
+        <div class="step-progress">${dots}</div>
+        <div class="step-duration">Question ${idx + 1} of ${quiz.questions.length}</div>
+        <div class="step-title" style="margin-top:6px;">${q.question}</div>
+        <div class="quiz-options mt16" id="quiz-options">
+          ${q.options.map((opt, i) => `<button class="quiz-option-btn" data-i="${i}">${opt}</button>`).join("")}
+        </div>
+        <div id="quiz-feedback"></div>
+      </div>`;
+
+    el.querySelectorAll(".quiz-option-btn").forEach(btn => {
+      btn.onclick = () => {
+        const chosen = Number(btn.dataset.i);
+        const correct = chosen === q.correctIndex;
+        if (correct) correctCount++;
+        answers.push(chosen);
+
+        el.querySelectorAll(".quiz-option-btn").forEach((b, i) => {
+          b.disabled = true;
+          if (i === q.correctIndex) b.classList.add("correct");
+          else if (i === chosen) b.classList.add("incorrect");
+        });
+
+        document.getElementById("quiz-feedback").innerHTML = `
+          <div class="step-box mt16">
+            <div class="label">${correct ? "Correct" : "Not quite"}</div>
+            ${q.explanation || ""}
+          </div>
+          <button class="btn btn-primary mt8" id="btn-quiz-next">${idx < quiz.questions.length - 1 ? "Next" : "See Results"}</button>
+        `;
+        document.getElementById("btn-quiz-next").onclick = () => {
+          if (idx < quiz.questions.length - 1) { idx++; renderQuestion(); }
+          else finishQuiz();
+        };
+      };
+    });
+  }
+
+  function finishQuiz() {
+    quiz.completed = true;
+    quiz.score = correctCount;
+    quiz.total = quiz.questions.length;
+    saveState();
+    el.innerHTML = `
+      <div class="card center">
+        <div style="font-size:34px;">🎯</div>
+        <div style="font-weight:800; font-size:18px; margin-top:6px;">${correctCount} / ${quiz.questions.length}</div>
+        <p class="muted small">Nice work — on to the next stage.</p>
+        <button class="btn btn-primary mt16" id="btn-quiz-done">Continue</button>
+      </div>`;
+    document.getElementById("btn-quiz-done").onclick = () => renderToday();
+  }
+
+  renderQuestion();
 }
 
 function heroHTML(dayData) {
@@ -916,6 +1094,191 @@ function renderProgress() {
 }
 
 // ---------------------------------------------------------------
+// My Book — turns completed stages into printable chapters
+// ---------------------------------------------------------------
+let bookGenState = {}; // { [stageNum]: "generating" | "error" }
+let introGenState = null; // "generating" | "error" | null
+
+function renderBookView() {
+  const el = document.getElementById("view-book");
+  el.innerHTML = backRowHTML("more", "More") + renderMyBookSection();
+  wireBackRow(el);
+  wireMyBookSection(el);
+}
+
+function renderMyBookSection() {
+  const completedStages = CURRICULUM_STAGES.filter(s => {
+    const stageDays = CURRICULUM_DAYS.filter(d => d.stage === s.stage);
+    return stageDays.every(d => state.completedDays.includes(d.day));
+  });
+  const readyCount = completedStages.filter(s => state.stageBooklets[s.stage]).length;
+  const connected = !!state.settings.puterConnected;
+
+  return `
+    <h2 class="section-title">My Book</h2>
+    <div class="card center">
+      <div style="font-weight:700; margin-bottom:4px;">${readyCount} / ${CURRICULUM_STAGES.length} chapters ready</div>
+      <button class="btn btn-primary" id="btn-download-book">Download Full Book (PDF)</button>
+    </div>
+
+    ${!connected ? `<div class="card"><p class="small" style="color:#B35F1B; margin:0;">Connect Puter in Settings to generate vocabulary and reading passages. Grammar-only chapters still work without it.</p></div>` : ""}
+
+    ${completedStages.length ? `
+    <h2 class="section-title">Chapters</h2>
+    <div class="card" style="padding:6px 12px; max-height:300px; overflow-y:auto;">
+      ${completedStages.map(s => {
+        const booklet = state.stageBooklets[s.stage];
+        const genState = bookGenState[s.stage];
+        let action;
+        if (booklet) {
+          action = `<button class="btn btn-secondary book-download-btn" data-stage="${s.stage}" style="width:auto; padding:8px 12px; font-size:12.5px;">Download</button>`;
+        } else if (genState === "generating") {
+          action = `<span class="small muted">Writing…</span>`;
+        } else {
+          action = `<button class="btn btn-outline book-generate-btn" data-stage="${s.stage}" style="width:auto; padding:8px 12px; font-size:12.5px;" ${!connected ? "disabled" : ""}>Generate</button>`;
+        }
+        return `
+          <div class="row">
+            <div>
+              <div class="row-title">Chapter ${s.stage} · ${s.theme}</div>
+              <div class="row-sub">${booklet ? "Ready" : (genState === "error" ? "Failed — tap Generate to retry" : "Not generated yet")}</div>
+            </div>
+            ${action}
+          </div>`;
+      }).join("")}
+    </div>` : `<div class="card center small muted">Finish your first stage to unlock its chapter.</div>`}
+  `;
+}
+
+function wireMyBookSection(el) {
+  el.querySelectorAll(".book-generate-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const stageNum = Number(btn.dataset.stage);
+      bookGenState[stageNum] = "generating";
+      renderBookView();
+      try {
+        await generateStageBooklet(stageNum);
+        delete bookGenState[stageNum];
+      } catch (e) {
+        bookGenState[stageNum] = "error";
+      }
+      renderBookView();
+    };
+  });
+
+  el.querySelectorAll(".book-download-btn").forEach(btn => {
+    btn.onclick = () => downloadStageChapterPdf(Number(btn.dataset.stage));
+  });
+
+  const downloadBookBtn = document.getElementById("btn-download-book");
+  if (downloadBookBtn) downloadBookBtn.onclick = async () => {
+    downloadBookBtn.textContent = "Preparing…";
+    try {
+      await downloadFullBookPdf();
+    } finally {
+      downloadBookBtn.textContent = "Download Full Book (PDF)";
+    }
+  };
+}
+
+function openIntroReviewModal() {
+  const backdrop = document.getElementById("modal-backdrop");
+  const intro = state.bookIntro;
+  backdrop.innerHTML = `
+    <div class="modal-sheet">
+      <h3>Introduction</h3>
+      <p>Edit if you like, then approve to lock it into your book.</p>
+      <textarea id="intro-textarea" rows="8" style="width:100%; border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; font-size:13.5px; font-family:inherit;">${intro?.text || ""}</textarea>
+      <div class="modal-actions">
+        <button class="btn btn-outline" id="intro-cancel">Close</button>
+        <button class="btn btn-primary" id="intro-approve">Approve</button>
+      </div>
+    </div>`;
+  backdrop.classList.add("show");
+  document.getElementById("intro-cancel").onclick = () => backdrop.classList.remove("show");
+  document.getElementById("intro-approve").onclick = () => {
+    state.bookIntro = { text: document.getElementById("intro-textarea").value.trim(), approved: true };
+    saveState();
+    backdrop.classList.remove("show");
+    renderBookSettings();
+  };
+}
+
+// ---------------------------------------------------------------
+// Book Settings — cover, introduction, font, and generation prompt
+// ---------------------------------------------------------------
+function renderBookSettings() {
+  const el = document.getElementById("view-book-settings");
+  const connected = !!state.settings.puterConnected;
+  const bs = state.bookSettings;
+
+  const introStatus = !state.bookIntro
+    ? `<button class="btn btn-secondary" id="btn-gen-intro" ${!connected ? "disabled" : ""}>${introGenState === "generating" ? "Writing…" : "Generate Introduction"}</button>`
+    : !state.bookIntro.approved
+      ? `<button class="btn btn-secondary" id="btn-review-intro">Review Introduction</button>`
+      : `<div class="row"><div class="row-title">✓ Introduction ready</div><button class="icon-btn" id="btn-review-intro">Edit</button></div>`;
+
+  el.innerHTML = `
+    ${backRowHTML("settings", "Settings")}
+    <h2 class="section-title">Cover</h2>
+    <div class="card">
+      <p class="small muted" style="margin:0 0 10px;">Your cover is a custom-designed image (not generated by the app). To change the name, subtitle, or artwork on it, replace <code>assets/book-cover.png</code> with a new A4-ratio image.</p>
+      <div class="row-title small" style="margin-bottom:6px;">Your Name</div>
+      <input type="text" id="book-author-input" placeholder="Used in the introduction text" value="${state.userName || ""}">
+    </div>
+
+    <h2 class="section-title">Introduction</h2>
+    <div class="card">
+      <p class="small muted" style="margin-top:0;">Victor writes this once, for you — you can edit or regenerate it any time before approving.</p>
+      ${!connected ? `<p class="small" style="color:#B35F1B;">Connect Puter in Settings to generate one.</p>` : ""}
+      <div class="mt8">${introStatus}</div>
+    </div>
+
+    <h2 class="section-title">Typography</h2>
+    <div class="card">
+      <div class="row-title small" style="margin-bottom:6px;">Font</div>
+      <select id="book-font-select">
+        <option value="helvetica" ${bs.font === "helvetica" ? "selected" : ""}>Sans-serif (Helvetica)</option>
+        <option value="times" ${bs.font === "times" ? "selected" : ""}>Serif (Times)</option>
+      </select>
+      <div class="row-title small mt16" style="margin-bottom:6px;">Text Size</div>
+      <select id="book-size-select">
+        <option value="1" ${bs.fontSizeScale === 1 ? "selected" : ""}>Normal</option>
+        <option value="1.15" ${bs.fontSizeScale === 1.15 ? "selected" : ""}>Large</option>
+      </select>
+    </div>
+
+    <h2 class="section-title">Chapter Generation</h2>
+    <div class="card">
+      <p class="small muted" style="margin-top:0;">Optional — anything you add here is included every time Victor writes a new chapter (grammar notes, vocabulary, reading, speaking prompts and exercises).</p>
+      <textarea id="book-extra-instructions" rows="4" placeholder="e.g. Keep example sentences workplace-related." style="width:100%; border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; font-size:13.5px; font-family:inherit;">${bs.extraInstructions || ""}</textarea>
+    </div>
+  `;
+
+  wireBackRow(el);
+  document.getElementById("book-author-input").onchange = (e) => { state.userName = e.target.value; saveState(); };
+  document.getElementById("book-font-select").onchange = (e) => { state.bookSettings.font = e.target.value; saveState(); };
+  document.getElementById("book-size-select").onchange = (e) => { state.bookSettings.fontSizeScale = Number(e.target.value); saveState(); };
+  document.getElementById("book-extra-instructions").onchange = (e) => { state.bookSettings.extraInstructions = e.target.value; saveState(); };
+
+  const genIntroBtn = document.getElementById("btn-gen-intro");
+  if (genIntroBtn) genIntroBtn.onclick = async () => {
+    introGenState = "generating";
+    renderBookSettings();
+    try {
+      await generateBookIntro();
+    } catch (e) {
+      introGenState = "error";
+    }
+    introGenState = null;
+    renderBookSettings();
+    if (state.bookIntro) openIntroReviewModal();
+  };
+  const reviewIntroBtn = document.getElementById("btn-review-intro");
+  if (reviewIntroBtn) reviewIntroBtn.onclick = openIntroReviewModal;
+}
+
+// ---------------------------------------------------------------
 // RESOURCES view
 // ---------------------------------------------------------------
 const RESOURCE_TYPES = ["Listening","Reading","Speaking","Grammar","Writing","Shadowing","Vocabulary"];
@@ -943,6 +1306,7 @@ function renderResources() {
   }).join("");
 
   el.innerHTML = `
+    ${backRowHTML("more", "More")}
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
       <h2 class="section-title" style="margin:0;">Resources</h2>
       <button class="btn btn-secondary" style="width:auto; padding:8px 14px;" id="btn-add-resource">+ Add</button>
@@ -951,6 +1315,7 @@ function renderResources() {
   `;
 
   document.getElementById("btn-add-resource").onclick = () => openResourceModal();
+  wireBackRow(el);
   el.querySelectorAll("[data-edit]").forEach(btn => {
     btn.onclick = () => openResourceModal(state.resources.find(r => r.id === btn.dataset.edit));
   });
@@ -1054,6 +1419,14 @@ function renderSettings() {
       </select>
     </div>
 
+    <h2 class="section-title">My Book</h2>
+    <div class="card">
+      <div class="row more-row" data-go="book-settings">
+        <div class="row-title">Book Settings</div>
+        <div class="chevron">›</div>
+      </div>
+    </div>
+
     <h2 class="section-title">Backup</h2>
     <div class="card">
       <button class="btn btn-secondary" id="btn-export">Export Backup</button>
@@ -1100,6 +1473,9 @@ function renderSettings() {
     state.restDay = e.target.value;
     saveState();
   };
+  el.querySelectorAll("[data-go]").forEach(row => {
+    row.onclick = () => switchView(row.dataset.go);
+  });
   document.getElementById("btn-export").onclick = exportBackup;
   document.getElementById("btn-import").onclick = () => document.getElementById("import-file").click();
   document.getElementById("import-file").onchange = importBackup;
@@ -1148,10 +1524,13 @@ function exportBackup() {
       completedDays: state.completedDays,
       streak: state.streak,
       bestStreak: state.bestStreak,
-      lastCompletionDate: state.lastCompletionDate
+      lastCompletionDate: state.lastCompletionDate,
+      lessonCredits: state.lessonCredits,
+      lastCreditGrantDate: state.lastCreditGrantDate
     },
     resources: state.resources,
-    settings: { restDay: state.restDay }
+    settings: { restDay: state.restDay, userName: state.userName },
+    book: { bookIntro: state.bookIntro, stageBooklets: state.stageBooklets }
   };
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -1211,6 +1590,15 @@ function mergeBackup(backup) {
   }
   if (backup.settings && backup.settings.restDay) {
     state.restDay = backup.settings.restDay;
+  }
+  if (backup.settings && backup.settings.userName && !state.userName) {
+    state.userName = backup.settings.userName;
+  }
+  if (backup.book) {
+    if (backup.book.bookIntro && !state.bookIntro) state.bookIntro = backup.book.bookIntro;
+    if (backup.book.stageBooklets) {
+      state.stageBooklets = { ...backup.book.stageBooklets, ...state.stageBooklets };
+    }
   }
   saveState();
 }
@@ -1303,6 +1691,10 @@ Current streak: ${state.streak} days`;
   const prompt = `${systemContext}\n\nLearner says: ${userMessage}`;
 
   const result = await window.puter.ai.chat(prompt, { model: state.settings.model });
+  return extractPuterText(result);
+}
+
+function extractPuterText(result) {
   if (typeof result === "string") return result;
   if (result?.message?.content) {
     return Array.isArray(result.message.content)
@@ -1310,7 +1702,250 @@ Current streak: ${state.streak} days`;
       : result.message.content;
   }
   if (result?.toString) return result.toString();
-  return "Sorry, I couldn't put together a reply just now.";
+  return "";
+}
+
+// ---------------------------------------------------------------
+// My Book — per-stage chapters (vocabulary + reading passage, AI-generated
+// once and cached) assembled into a printable PDF via jsPDF.
+// ---------------------------------------------------------------
+async function generateStageBooklet(stageNum) {
+  const stageDays = CURRICULUM_DAYS.filter(d => d.stage === stageNum && !d.isCheckpoint);
+  const stage = CURRICULUM_STAGES.find(s => s.stage === stageNum);
+  const topics = stageDays.map(d => d.topic).join(", ");
+  const grammarList = stageDays.map(d => d.grammarFocus).join("; ");
+
+  const prompt =
+`For an English learner at ${stage.cefr} level, covering this stage of study — theme: "${stage.theme}", topics covered: ${topics}, grammar covered: ${grammarList} —
+produce:
+1) 15-18 key vocabulary words/phrases from these topics, each with a short meaning and one example sentence.
+2) One short original reading passage (150-220 words) at ${stage.cefr} level, naturally using several of these topics and at least one of the grammar points.
+
+Respond ONLY with strict JSON, no markdown, no commentary, in this exact shape:
+{"vocabulary":[{"term":"...","meaning":"...","example":"..."}],"reading":{"title":"...","text":"..."}}`;
+
+  const result = await window.puter.ai.chat(prompt, { model: state.settings.model });
+  let text = extractPuterText(result).trim().replace(/^```json\s*|^```\s*|```$/g, "");
+  const parsed = JSON.parse(text);
+  if (!parsed.vocabulary || !parsed.reading) throw new Error("Unexpected response shape");
+
+  state.stageBooklets[stageNum] = {
+    vocabulary: parsed.vocabulary.slice(0, 20),
+    reading: parsed.reading,
+    generatedDate: todayISO()
+  };
+  saveState();
+  return state.stageBooklets[stageNum];
+}
+
+// ---------------------------------------------------------------
+// Stage Quiz — a short gate between stages. Testing retention, not gatekeeping
+// on a passing score: the learner always sees their result and can continue.
+// ---------------------------------------------------------------
+async function generateStageQuiz(stageNum) {
+  const stageDays = CURRICULUM_DAYS.filter(d => d.stage === stageNum && !d.isCheckpoint);
+  const stage = CURRICULUM_STAGES.find(s => s.stage === stageNum);
+  const topics = stageDays.map(d => d.topic).join(", ");
+  const grammarList = stageDays.map(d => d.grammarFocus).join("; ");
+
+  const prompt =
+`Write a short 6-question multiple-choice quiz for an English learner at ${stage.cefr} level, testing the
+grammar and vocabulary from this stage — theme: "${stage.theme}", topics: ${topics}, grammar: ${grammarList}.
+Mix grammar and vocabulary questions. Each question has exactly 4 options, one correct.
+
+Respond ONLY with strict JSON, no markdown, no commentary, in this exact shape:
+{"questions":[{"question":"...","options":["...","...","...","..."],"correctIndex":0,"explanation":"short reason the correct answer is right"}]}`;
+
+  const result = await window.puter.ai.chat(prompt, { model: state.settings.model });
+  let text = extractPuterText(result).trim().replace(/^```json\s*|^```\s*|```$/g, "");
+  const parsed = JSON.parse(text);
+  if (!Array.isArray(parsed.questions) || !parsed.questions.length) throw new Error("Unexpected response shape");
+
+  state.stageQuizzes[stageNum] = {
+    questions: parsed.questions.slice(0, 8),
+    completed: false,
+    score: null,
+    total: null
+  };
+  saveState();
+  return state.stageQuizzes[stageNum];
+}
+
+// The stage that just finished and needs a quiz gate before the next stage
+// can start, or null if no gate is pending right now.
+function pendingQuizStage() {
+  const prevDay = getDayData(state.currentDay - 1);
+  if (!prevDay || prevDay.isCheckpoint) return null;
+  if (prevDay.day % 6 !== 0) return null;
+  const quiz = state.stageQuizzes[prevDay.stage];
+  if (quiz && quiz.completed) return null;
+  return prevDay.stage;
+}
+
+async function generateBookIntro() {
+  const name = state.userName?.trim() || "this learner";
+  const prompt =
+`Write a short, warm introduction (3 short paragraphs, under 180 words total) for the front of a personal English-learning book titled "ENGLISH JOURNEY", written for ${name}. It should mention: a 180-day practical journey from A2 to B2 English, built around real daily practice rather than rote memorization, and end on an encouraging note. Written in second person ("you"), warm and professional, not childish. Plain text only, no markdown, no headers.`;
+
+  const result = await window.puter.ai.chat(prompt, { model: state.settings.model });
+  const text = extractPuterText(result).trim();
+  if (!text) throw new Error("Empty response");
+  state.bookIntro = { text, approved: false };
+  saveState();
+  return state.bookIntro;
+}
+
+async function loadImageAsDataURL(url) {
+  const res = await fetch(url);
+  const blob = await res.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Small helper that tracks a y-cursor and wraps/paginates text automatically,
+// so the book-building code below doesn't have to do manual layout math.
+function createPdfWriter(doc) {
+  const margin = 50;
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const contentWidth = pageWidth - margin * 2;
+  const w = { doc, margin, pageWidth, pageHeight, contentWidth, y: margin };
+
+  w.newPage = () => { doc.addPage(); w.y = margin; };
+  w.ensureSpace = (h) => { if (w.y + h > pageHeight - margin) w.newPage(); };
+  w.spacer = (h) => { w.y += h; };
+  w.text = (str, opts = {}) => {
+    const size = opts.size || 11;
+    const style = opts.style || "normal";
+    const color = opts.color || [16, 48, 46];
+    const lineHeight = opts.lineHeight || size * 1.45;
+    doc.setFont("helvetica", style);
+    doc.setFontSize(size);
+    doc.setTextColor(...color);
+    const lines = doc.splitTextToSize(str, contentWidth);
+    lines.forEach(line => {
+      w.ensureSpace(lineHeight);
+      doc.text(line, margin, w.y);
+      w.y += lineHeight;
+    });
+    w.y += (opts.gapAfter ?? 6);
+  };
+  return w;
+}
+
+// Builds either one standalone chapter PDF (onlyStage set) or the full book
+// (cover + TOC + introduction + every generated chapter).
+async function buildBookPdf({ onlyStage } = {}) {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: "pt", format: "a4" });
+  const w = createPdfWriter(doc);
+
+  if (!onlyStage) {
+    // Full-bleed designed cover (the name/subtitle are baked into this image —
+    // if either ever needs to change, replace assets/book-cover.png).
+    const coverDataUrl = await loadImageAsDataURL("assets/book-cover.png").catch(() => null);
+    if (coverDataUrl) {
+      doc.addImage(coverDataUrl, "PNG", 0, 0, w.pageWidth, w.pageHeight);
+    }
+    w.newPage();
+  }
+
+  let tocStartPage = null;
+  if (!onlyStage) {
+    tocStartPage = doc.internal.getNumberOfPages();
+    w.newPage(); // reserve a 2nd TOC page (filled in later; blank pages are harmless)
+    w.newPage();
+
+    w.text("Introduction", { size: 20, style: "bold", gapAfter: 14 });
+    const introText = (state.bookIntro && state.bookIntro.approved)
+      ? state.bookIntro.text
+      : "Welcome to your personal English Journey book \u2014 a record of 180 days of practical English practice, from everyday conversations to workplace communication.";
+    w.text(introText, { size: 11.5 });
+    w.newPage();
+  }
+
+  const chapterPageOf = {};
+  const stagesToRender = onlyStage ? [onlyStage] : CURRICULUM_STAGES.map(s => s.stage);
+
+  stagesToRender.forEach((stageNum) => {
+    const stage = CURRICULUM_STAGES.find(s => s.stage === stageNum);
+    const stageDays = CURRICULUM_DAYS.filter(d => d.stage === stageNum && !d.isCheckpoint);
+    const booklet = state.stageBooklets[stageNum];
+
+    if (w.y > w.margin + 4) w.newPage();
+    chapterPageOf[stageNum] = doc.internal.getNumberOfPages();
+
+    w.text(`Chapter ${stageNum} \u2014 ${stage.theme}`, { size: 18, style: "bold", gapAfter: 2 });
+    w.text(`${stage.cefr} level`, { size: 10, color: [100, 120, 118], gapAfter: 16 });
+
+    w.text("Grammar Points", { size: 13, style: "bold", gapAfter: 6 });
+    stageDays.forEach(d => w.text(`\u2022  ${d.topic}: ${d.grammarFocus}`, { size: 10.5, gapAfter: 4 }));
+    w.spacer(8);
+
+    w.text("Key Vocabulary", { size: 13, style: "bold", gapAfter: 6 });
+    if (booklet?.vocabulary?.length) {
+      booklet.vocabulary.forEach(v => {
+        w.text(`\u2022  ${v.term} \u2014 ${v.meaning}`, { size: 10.5, gapAfter: 1 });
+        w.text(`   "${v.example}"`, { size: 10, style: "italic", color: [14, 167, 158], gapAfter: 5 });
+      });
+    } else {
+      w.text("Not generated yet \u2014 open ENGLISH JOURNEY and generate this chapter with Victor.", { size: 10.5, color: [150, 90, 30] });
+    }
+    w.spacer(8);
+
+    w.text("Reading", { size: 13, style: "bold", gapAfter: 6 });
+    if (booklet?.reading) {
+      w.text(booklet.reading.title, { size: 11.5, style: "bold", gapAfter: 6 });
+      w.text(booklet.reading.text, { size: 10.5, gapAfter: 6 });
+    } else {
+      w.text("Not generated yet.", { size: 10.5, color: [150, 90, 30] });
+    }
+    w.newPage();
+  });
+
+  if (!onlyStage && tocStartPage) {
+    doc.setPage(tocStartPage);
+    let ty = w.margin;
+    let curPage = tocStartPage;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(18); doc.setTextColor(6, 59, 60);
+    doc.text("Table of Contents", w.margin, ty);
+    ty += 30;
+    CURRICULUM_STAGES.forEach(s => {
+      if (ty > w.pageHeight - w.margin) {
+        curPage += 1;
+        doc.setPage(curPage);
+        ty = w.margin;
+      }
+      doc.setFont("helvetica", "normal"); doc.setFontSize(11); doc.setTextColor(16, 48, 46);
+      doc.text(`Chapter ${s.stage} \u2014 ${s.theme}`, w.margin, ty);
+      doc.text(String(chapterPageOf[s.stage] || "\u2014"), w.pageWidth - w.margin, ty, { align: "right" });
+      ty += 20;
+    });
+  }
+
+  const total = doc.internal.getNumberOfPages();
+  for (let p = onlyStage ? 1 : 2; p <= total; p++) {
+    doc.setPage(p);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(8.5); doc.setTextColor(160, 175, 173);
+    doc.text("ENGLISH JOURNEY", w.margin, 28);
+    doc.text(String(p), w.pageWidth / 2, w.pageHeight - 24, { align: "center" });
+  }
+
+  return doc;
+}
+
+async function downloadStageChapterPdf(stageNum) {
+  const doc = await buildBookPdf({ onlyStage: stageNum });
+  doc.save(`EnglishJourney_Chapter${String(stageNum).padStart(2, "0")}.pdf`);
+}
+
+async function downloadFullBookPdf() {
+  const doc = await buildBookPdf({});
+  doc.save("EnglishJourney_Book.pdf");
 }
 
 function openVictorChat() {
