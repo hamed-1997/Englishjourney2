@@ -1,4 +1,4 @@
-const CACHE = "english-journey-v6";
+const CACHE = "english-journey-v9";
 const ASSETS = [
   "./",
   "./index.html",
@@ -7,6 +7,7 @@ const ASSETS = [
   "./js/curriculum-data.js",
   "./manifest.json",
   "./assets/logo.png",
+  "./assets/book-cover.png",
   "./assets/splash-icon.png",
   "./assets/splash-plane.png",
   "./assets/splash-text.png",
