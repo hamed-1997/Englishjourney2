@@ -7,7 +7,7 @@
 // Storage
 // ---------------------------------------------------------------
 const STORE_KEY = "ej_state_v1";
-const APP_VERSION = "2026.09.06";
+const APP_VERSION = "2026.09.06c";
 
 // Seeded default resources — real, verified, free tools (not placeholders).
 // The user can edit or delete any of these; this just means Resources isn't empty on day one.
@@ -55,7 +55,9 @@ function defaultState() {
       font: "helvetica",       // "helvetica" | "times"
       fontSizeScale: 1,        // 1 = normal, 1.15 = large
       extraInstructions: ""    // free-text, appended to the chapter-generation prompt
-    }
+    },
+    vocabulary: [],            // {id, term, meaning, translationFa, example, box, nextReviewDate, addedDate, source, day}
+    dayVocabCache: {}          // { [day]: [{term, meaning, translationFa, example}] } — generated once per day, cached
   };
 }
 
@@ -475,8 +477,8 @@ function percentComplete() {
 // ---------------------------------------------------------------
 // Navigation
 // ---------------------------------------------------------------
-const VIEW_TITLES = { today: "Home", journey: "Journey", progress: "Progress", more: "More", resources: "Resources", book: "My Book", "book-settings": "Book Settings", settings: "Settings" };
-const MORE_SUBVIEWS = ["resources", "book", "book-settings"];
+const VIEW_TITLES = { today: "Home", journey: "Journey", progress: "Progress", vocabulary: "Vocabulary", "vocab-review": "Review", more: "More", resources: "Resources", book: "My Book", "book-settings": "Book Settings", settings: "Settings" };
+const MORE_SUBVIEWS = ["resources", "book", "book-settings", "settings"];
 
 function switchView(name) {
   document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
@@ -489,6 +491,8 @@ function switchView(name) {
   if (name === "today") renderToday();
   if (name === "journey") renderJourney();
   if (name === "progress") renderProgress();
+  if (name === "vocabulary") renderVocabulary();
+  if (name === "vocab-review") renderVocabReview();
   if (name === "more") renderMore();
   if (name === "resources") renderResources();
   if (name === "book") renderBookView();
@@ -515,6 +519,10 @@ function renderMore() {
       </div>
       <div class="row more-row" data-go="book">
         <div class="row-title">My Book</div>
+        <div class="chevron">›</div>
+      </div>
+      <div class="row more-row" data-go="settings">
+        <div class="row-title">Settings</div>
         <div class="chevron">›</div>
       </div>
     </div>
@@ -1390,6 +1398,7 @@ function renderSettings() {
   const updating = window.__ejUpdating === true;
 
   el.innerHTML = `
+    ${backRowHTML("more", "More")}
     <h2 class="section-title">AI / Puter</h2>
     <div class="card">
       <div class="row">
@@ -1476,6 +1485,7 @@ function renderSettings() {
   el.querySelectorAll("[data-go]").forEach(row => {
     row.onclick = () => switchView(row.dataset.go);
   });
+  wireBackRow(el);
   document.getElementById("btn-export").onclick = exportBackup;
   document.getElementById("btn-import").onclick = () => document.getElementById("import-file").click();
   document.getElementById("import-file").onchange = importBackup;
@@ -1703,6 +1713,535 @@ function extractPuterText(result) {
   }
   if (result?.toString) return result.toString();
   return "";
+}
+
+// ---------------------------------------------------------------
+// Vocabulary & Leitner — a real personal dictionary with spaced review
+// ---------------------------------------------------------------
+const LEITNER_INTERVALS = [1, 2, 4, 8, 16]; // days, indexed by box (1-5)
+
+function playPronunciation(word) {
+  if (word && word.audioUrl) {
+    const audio = new Audio(word.audioUrl);
+    audio.play().catch(() => speak(word.term));
+    return;
+  }
+  speak(word?.term || word);
+}
+
+function speak(text) {
+  if (!("speechSynthesis" in window)) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "en-US";
+  speechSynthesis.speak(u);
+}
+
+function addDaysISO(days) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return isoDateFor(d);
+}
+
+function addWordToDictionary(word, source, dayNum) {
+  const exists = state.vocabulary.some(v => v.term.toLowerCase() === word.term.toLowerCase());
+  if (exists) return false;
+  state.vocabulary.push({
+    id: "w" + Date.now() + Math.random().toString(36).slice(2, 7),
+    term: word.term,
+    meaning: word.meaning || "",
+    translationFa: word.translationFa || "",
+    example: word.example || "",
+    phonetic: word.phonetic || "",
+    audioUrl: word.audioUrl || "",
+    box: 1,
+    nextReviewDate: todayISO(),
+    addedDate: todayISO(),
+    source: source || "manual",
+    day: dayNum || null
+  });
+  saveState();
+  return true;
+}
+
+function getDueWords() {
+  const today = todayISO();
+  return state.vocabulary.filter(w => w.nextReviewDate <= today);
+}
+
+function reviewWord(id, knewIt) {
+  const w = state.vocabulary.find(v => v.id === id);
+  if (!w) return;
+  if (knewIt) {
+    w.box = Math.min(w.box + 1, LEITNER_INTERVALS.length);
+  } else {
+    w.box = 1;
+  }
+  w.nextReviewDate = addDaysISO(LEITNER_INTERVALS[w.box - 1]);
+  saveState();
+}
+
+// Real dictionary lookup — free, keyless, official public API. Gives an
+// English meaning, phonetic spelling, a real recorded pronunciation (when
+// available), and often an example — no AI call needed for these parts.
+async function fetchFreeDictionary(term) {
+  try {
+    const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(term.trim().toLowerCase())}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const entry = data[0];
+    if (!entry) return null;
+    let meaning = "", example = "";
+    for (const m of entry.meanings || []) {
+      const def = (m.definitions || [])[0];
+      if (def) { meaning = def.definition || ""; example = def.example || ""; break; }
+    }
+    if (!meaning) return null;
+    let phonetic = entry.phonetic || "";
+    let audioUrl = "";
+    for (const p of entry.phonetics || []) {
+      if (p.audio && !audioUrl) audioUrl = p.audio;
+      if (p.text && !phonetic) phonetic = p.text;
+    }
+    return { term, meaning, example, phonetic, audioUrl };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Only asks Victor for what the dictionary can't give: a Persian translation
+// (always), and full meaning/example for anything the dictionary didn't have.
+async function generateWordDetails(terms) {
+  const dictResults = await Promise.all(terms.map(t => fetchFreeDictionary(t)));
+  const foundIdx = [], missingTerms = [];
+  dictResults.forEach((r, i) => { if (r) foundIdx.push(i); else missingTerms.push(terms[i]); });
+
+  const translations = {};
+  if (foundIdx.length && puterAvailable()) {
+    try {
+      const list = foundIdx.map(i => `"${terms[i]}"`).join(", ");
+      const prompt = `Give a short Persian translation for each of these English words/phrases: ${list}.
+Respond ONLY with strict JSON, no markdown: [{"term":"...","translationFa":"..."}] in the same order given.`;
+      const result = await window.puter.ai.chat(prompt, { model: state.settings.model });
+      const text = extractPuterText(result).trim().replace(/^```json\s*|^```\s*|```$/g, "");
+      JSON.parse(text).forEach(p => { translations[p.term] = p.translationFa; });
+    } catch (e) { /* leave translations blank, still usable */ }
+  }
+
+  let fullAiResults = {};
+  if (missingTerms.length && puterAvailable()) {
+    try {
+      const full = await generateWordDetailsFullAI(missingTerms);
+      full.forEach(f => { fullAiResults[f.term] = f; });
+    } catch (e) { /* fall through to blanks below */ }
+  }
+
+  return terms.map((term, i) => {
+    if (dictResults[i]) {
+      return { term, meaning: dictResults[i].meaning, example: dictResults[i].example,
+        phonetic: dictResults[i].phonetic, audioUrl: dictResults[i].audioUrl,
+        translationFa: translations[term] || "" };
+    }
+    return fullAiResults[term] || { term, meaning: "", translationFa: "", example: "", phonetic: "", audioUrl: "" };
+  });
+}
+
+// Fallback for words the free dictionary doesn't have — AI builds everything.
+async function generateWordDetailsFullAI(terms) {
+  const list = terms.map(t => `"${t}"`).join(", ");
+  const prompt =
+`For each of these English words or phrases: ${list}
+give a short simple English meaning, a Persian translation, and one short example sentence.
+Respond ONLY with strict JSON, no markdown, no commentary, in this exact shape, one entry per word IN THE SAME ORDER given:
+[{"term":"...","meaning":"...","translationFa":"...","example":"..."}]`;
+  const result = await window.puter.ai.chat(prompt, { model: state.settings.model });
+  let text = extractPuterText(result).trim().replace(/^```json\s*|^```\s*|```$/g, "");
+  const parsed = JSON.parse(text);
+  if (!Array.isArray(parsed)) throw new Error("Unexpected response shape");
+  return parsed;
+}
+
+async function generateDayVocab(dayData) {
+  if (state.dayVocabCache[dayData.day]) return state.dayVocabCache[dayData.day];
+  const prompt =
+`Give 8 useful English words or short phrases for a ${dayData.cefr}-level learner, for today's lesson topic "${dayData.topic}" (grammar: ${dayData.grammarFocus}).
+Respond ONLY with strict JSON, no markdown, no commentary, in this exact shape:
+[{"term":"...","meaning":"short simple English definition","translationFa":"Persian translation","example":"one short example sentence"}]`;
+  const result = await window.puter.ai.chat(prompt, { model: state.settings.model });
+  let text = extractPuterText(result).trim().replace(/^```json\s*|^```\s*|```$/g, "");
+  const parsed = JSON.parse(text);
+  if (!Array.isArray(parsed)) throw new Error("Unexpected response shape");
+  state.dayVocabCache[dayData.day] = parsed.slice(0, 10);
+  saveState();
+  return state.dayVocabCache[dayData.day];
+}
+
+let vocabTab = "lesson"; // "lesson" | "dictionary"
+let vocabExpandedStage = null;
+let vocabExpandedDay = null;
+let vocabDayGenState = {}; // { [day]: "generating" | "error" }
+let vocabExpandedWordId = null;
+
+function renderVocabulary() {
+  const el = document.getElementById("view-vocabulary");
+  el.innerHTML = `
+    <div class="vocab-tabs">
+      <button class="vocab-tab-btn ${vocabTab === "lesson" ? "active" : ""}" data-tab="lesson">By Lesson</button>
+      <button class="vocab-tab-btn ${vocabTab === "dictionary" ? "active" : ""}" data-tab="dictionary">My Dictionary</button>
+    </div>
+    <div id="vocab-tab-content"></div>
+  `;
+  el.querySelectorAll(".vocab-tab-btn").forEach(btn => {
+    btn.onclick = () => { vocabTab = btn.dataset.tab; renderVocabulary(); };
+  });
+  const content = document.getElementById("vocab-tab-content");
+  if (vocabTab === "lesson") renderVocabByLesson(content);
+  else renderVocabDictionary(content);
+}
+
+function renderVocabByLesson(el) {
+  const connected = !!state.settings.puterConnected;
+  el.innerHTML = `
+    ${!connected ? `<div class="card"><p class="small" style="color:#B35F1B; margin:0;">Connect Puter in Settings to generate vocabulary for each lesson.</p></div>` : ""}
+    <div class="journey-path">
+      ${CURRICULUM_STAGES.map(s => {
+        const stageDays = CURRICULUM_DAYS.filter(d => d.stage === s.stage);
+        const isExpanded = vocabExpandedStage === s.stage;
+        const doneCount = stageDays.filter(d => state.completedDays.includes(d.day)).length;
+        const cls = doneCount === 6 ? "done" : (stageDays.some(d => d.day === state.currentDay) ? "active" : "locked");
+        const icon = doneCount === 6 ? "✓" : (cls === "locked" ? "🔒" : s.stage);
+        return `
+          <div class="stage-block">
+            <div class="stage-item ${isExpanded ? "expanded" : ""}" data-stage="${s.stage}">
+              <div class="stage-node ${cls}">${icon}</div>
+              <div class="stage-info">
+                <div class="name">Stage ${s.stage} · ${s.theme}</div>
+                <div class="sub">${s.cefr} · ${doneCount}/6 sessions</div>
+              </div>
+              <div class="stage-chevron">▾</div>
+            </div>
+            <div class="vocab-day-list ${isExpanded ? "show" : ""}">
+              ${stageDays.map(d => renderVocabDayRow(d, connected)).join("")}
+            </div>
+          </div>`;
+      }).join("")}
+    </div>
+  `;
+  el.querySelectorAll(".stage-item").forEach(item => {
+    item.onclick = () => {
+      const s = Number(item.dataset.stage);
+      vocabExpandedStage = vocabExpandedStage === s ? null : s;
+      vocabExpandedDay = null;
+      renderVocabulary();
+    };
+  });
+  wireVocabDayRows(el, connected);
+}
+
+function renderVocabDayRow(d, connected) {
+  const isOpen = vocabExpandedDay === d.day;
+  const words = state.dayVocabCache[d.day];
+  const genState = vocabDayGenState[d.day];
+  let body = "";
+  if (isOpen) {
+    if (words) {
+      body = `<div class="vocab-word-rows">${words.map(w => vocabWordRowHTML(w, d.day)).join("")}</div>`;
+    } else if (genState === "generating") {
+      body = `<div class="small muted" style="padding:10px 4px;">Getting today's words…</div>`;
+    } else if (genState === "error") {
+      body = `<div class="small" style="color:#DC2626; padding:8px 4px;">Couldn't load words. <button class="btn-ghost vocab-retry-btn" data-day="${d.day}" style="padding:0;">Try again</button></div>`;
+    } else if (!connected) {
+      body = `<div class="small muted" style="padding:10px 4px;">Connect Puter to see key words for this lesson.</div>`;
+    } else {
+      body = `<div class="small muted" style="padding:10px 4px;">Loading…</div>`;
+    }
+  }
+  return `
+    <div class="vocab-day-row">
+      <div class="vocab-day-header" data-day="${d.day}">
+        <span class="vocab-day-num">Day ${d.day}</span>
+        <span class="vocab-day-topic">${d.topic}</span>
+        <span class="vocab-day-chevron">${isOpen ? "▾" : "›"}</span>
+      </div>
+      ${body}
+    </div>`;
+}
+
+function vocabWordRowHTML(w, dayNum) {
+  const already = state.vocabulary.some(v => v.term.toLowerCase() === w.term.toLowerCase());
+  return `
+    <div class="vocab-word-row">
+      <button class="icon-btn vocab-speak-btn" data-term="${escapeHTML(w.term)}">🔊</button>
+      <div class="vocab-word-text">
+        <div class="vterm">${w.term}</div>
+        <div class="vmeaning small muted">${w.meaning}</div>
+      </div>
+      <button class="btn ${already ? "btn-secondary" : "btn-outline"} vocab-add-btn" data-term="${escapeHTML(w.term)}" data-meaning="${escapeHTML(w.meaning)}" data-fa="${escapeHTML(w.translationFa || "")}" data-example="${escapeHTML(w.example || "")}" data-day="${dayNum}" style="width:auto; padding:6px 11px; font-size:12px;" ${already ? "disabled" : ""}>${already ? "Added ✓" : "+ Add"}</button>
+    </div>`;
+}
+
+function wireVocabDayRows(el, connected) {
+  el.querySelectorAll(".vocab-day-header").forEach(header => {
+    header.onclick = (e) => {
+      e.stopPropagation();
+      const day = Number(header.dataset.day);
+      vocabExpandedDay = vocabExpandedDay === day ? null : day;
+      if (vocabExpandedDay && !state.dayVocabCache[day] && connected && vocabDayGenState[day] !== "generating") {
+        const dayData = getDayData(day);
+        vocabDayGenState[day] = "generating";
+        renderVocabulary();
+        generateDayVocab(dayData)
+          .then(() => { delete vocabDayGenState[day]; renderVocabulary(); })
+          .catch(() => { vocabDayGenState[day] = "error"; renderVocabulary(); });
+        return;
+      }
+      renderVocabulary();
+    };
+  });
+  el.querySelectorAll(".vocab-retry-btn").forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const day = Number(btn.dataset.day);
+      vocabDayGenState[day] = "generating";
+      renderVocabulary();
+      generateDayVocab(getDayData(day))
+        .then(() => { delete vocabDayGenState[day]; renderVocabulary(); })
+        .catch(() => { vocabDayGenState[day] = "error"; renderVocabulary(); });
+    };
+  });
+  el.querySelectorAll(".vocab-speak-btn").forEach(btn => {
+    btn.onclick = (e) => { e.stopPropagation(); speak(btn.dataset.term); };
+  });
+  el.querySelectorAll(".vocab-add-btn").forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = "Adding…";
+      const base = {
+        term: btn.dataset.term, meaning: btn.dataset.meaning,
+        translationFa: btn.dataset.fa, example: btn.dataset.example
+      };
+      // Best-effort: enrich with real phonetic/audio from the free dictionary.
+      const dict = await fetchFreeDictionary(btn.dataset.term).catch(() => null);
+      if (dict) { base.phonetic = dict.phonetic; base.audioUrl = dict.audioUrl; }
+      addWordToDictionary(base, "day", Number(btn.dataset.day));
+      renderVocabulary();
+    };
+  });
+}
+
+function renderVocabDictionary(el) {
+  const dueCount = getDueWords().length;
+  el.innerHTML = `
+    <div class="card center">
+      <div style="font-weight:700; margin-bottom:4px;">${dueCount} word${dueCount === 1 ? "" : "s"} due for review</div>
+      <button class="btn btn-primary" id="btn-start-review" ${dueCount === 0 ? "disabled" : ""}>Start Review</button>
+    </div>
+    <div class="card" style="display:flex; gap:8px;">
+      <button class="btn btn-secondary" id="btn-add-word" style="width:auto; flex:1; padding:10px;">+ Add Word</button>
+      <button class="btn btn-outline" id="btn-bulk-add" style="width:auto; flex:1; padding:10px;">Bulk Add</button>
+    </div>
+    ${state.vocabulary.length ? `
+    <h2 class="section-title">All Words (${state.vocabulary.length})</h2>
+    <div class="card" style="padding:6px 12px; max-height:400px; overflow-y:auto;">
+      ${state.vocabulary.slice().reverse().map(w => vocabDictRowHTML(w)).join("")}
+    </div>` : `<div class="card center small muted">No words saved yet — add some from a lesson or manually.</div>`}
+  `;
+
+  document.getElementById("btn-start-review").onclick = () => switchView("vocab-review");
+  document.getElementById("btn-add-word").onclick = () => openManualAddWordModal();
+  document.getElementById("btn-bulk-add").onclick = () => openBulkAddModal();
+
+  el.querySelectorAll(".vocab-dict-header").forEach(row => {
+    row.onclick = () => {
+      const id = row.dataset.id;
+      vocabExpandedWordId = vocabExpandedWordId === id ? null : id;
+      renderVocabDictionary(el);
+    };
+  });
+  el.querySelectorAll(".vocab-speak-btn").forEach(btn => {
+    btn.onclick = (e) => { e.stopPropagation(); playPronunciation({ term: btn.dataset.term, audioUrl: btn.dataset.audio }); };
+  });
+  el.querySelectorAll(".vocab-delete-btn").forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      openConfirmModal("Remove this word from your dictionary?", () => {
+        state.vocabulary = state.vocabulary.filter(v => v.id !== btn.dataset.id);
+        saveState();
+        renderVocabDictionary(el);
+      });
+    };
+  });
+}
+
+function vocabDictRowHTML(w) {
+  const isOpen = vocabExpandedWordId === w.id;
+  return `
+    <div class="vocab-dict-item">
+      <div class="vocab-dict-header" data-id="${w.id}">
+        <button class="icon-btn vocab-speak-btn" data-term="${escapeHTML(w.term)}" data-audio="${escapeHTML(w.audioUrl || "")}">🔊</button>
+        <div class="vocab-word-text">
+          <div class="vterm">${w.term}${w.phonetic ? ` <span class="small muted">${w.phonetic}</span>` : ""}</div>
+          <div class="vmeaning small muted">${w.translationFa || w.meaning}</div>
+        </div>
+        <span class="pill" style="background:var(--primary-light); color:var(--teal-dark);">Box ${w.box}</span>
+      </div>
+      ${isOpen ? `
+        <div class="vocab-dict-detail">
+          ${w.meaning ? `<div class="small"><strong>Meaning:</strong> ${w.meaning}</div>` : ""}
+          ${w.translationFa ? `<div class="small mt8"><strong>فارسی:</strong> ${w.translationFa}</div>` : ""}
+          ${w.example ? `<div class="small mt8" style="font-style:italic; color:var(--primary);">"${w.example}"</div>` : ""}
+          <button class="btn btn-danger mt16 vocab-delete-btn" data-id="${w.id}" style="width:auto; padding:7px 12px; font-size:12.5px;">Remove</button>
+        </div>` : ""}
+    </div>`;
+}
+
+function openManualAddWordModal() {
+  const backdrop = document.getElementById("modal-backdrop");
+  const connected = !!state.settings.puterConnected;
+  backdrop.innerHTML = `
+    <div class="modal-sheet">
+      <h3>Add Word</h3>
+      <p>Type the English word — Victor fills in the meaning, Persian translation, and an example.</p>
+      <input type="text" id="mw-term" placeholder="e.g. commute">
+      ${!connected ? `<p class="small" style="color:#B35F1B;">Puter isn't connected — the word will be saved with blank details for now.</p>` : ""}
+      <div class="modal-actions">
+        <button class="btn btn-outline" id="mw-cancel">Cancel</button>
+        <button class="btn btn-primary" id="mw-save">Add</button>
+      </div>
+    </div>`;
+  backdrop.classList.add("show");
+  document.getElementById("mw-cancel").onclick = () => backdrop.classList.remove("show");
+  document.getElementById("mw-save").onclick = async () => {
+    const term = document.getElementById("mw-term").value.trim();
+    if (!term) return;
+    const saveBtn = document.getElementById("mw-save");
+    if (connected) {
+      saveBtn.textContent = "Looking up…";
+      saveBtn.disabled = true;
+      try {
+        const [details] = await generateWordDetails([term]);
+        addWordToDictionary(details, "manual");
+      } catch (e) {
+        addWordToDictionary({ term }, "manual");
+      }
+    } else {
+      addWordToDictionary({ term }, "manual");
+    }
+    backdrop.classList.remove("show");
+    renderVocabulary();
+  };
+}
+
+function openBulkAddModal() {
+  const backdrop = document.getElementById("modal-backdrop");
+  const connected = !!state.settings.puterConnected;
+  backdrop.innerHTML = `
+    <div class="modal-sheet">
+      <h3>Bulk Add</h3>
+      <p>One English word or phrase per line. Victor fills in the meaning, Persian translation, and an example for all of them.</p>
+      <textarea id="bulk-textarea" rows="8" placeholder="commute&#10;appointment&#10;would rather" style="width:100%; border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; font-size:13.5px; font-family:inherit;"></textarea>
+      ${!connected ? `<p class="small" style="color:#B35F1B;">Puter isn't connected — words will be saved with blank details for now.</p>` : ""}
+      <div class="modal-actions">
+        <button class="btn btn-outline" id="bulk-cancel">Cancel</button>
+        <button class="btn btn-primary" id="bulk-save">Add All</button>
+      </div>
+    </div>`;
+  backdrop.classList.add("show");
+  document.getElementById("bulk-cancel").onclick = () => backdrop.classList.remove("show");
+  document.getElementById("bulk-save").onclick = async () => {
+    const terms = document.getElementById("bulk-textarea").value.split("\n").map(l => l.trim()).filter(Boolean);
+    if (!terms.length) return;
+    const saveBtn = document.getElementById("bulk-save");
+    if (connected) {
+      saveBtn.textContent = "Looking up…";
+      saveBtn.disabled = true;
+      try {
+        const details = await generateWordDetails(terms);
+        details.forEach(d => addWordToDictionary(d, "manual"));
+      } catch (e) {
+        terms.forEach(term => addWordToDictionary({ term }, "manual"));
+      }
+    } else {
+      terms.forEach(term => addWordToDictionary({ term }, "manual"));
+    }
+    backdrop.classList.remove("show");
+    renderVocabulary();
+  };
+}
+
+// ---------------------------------------------------------------
+// Vocabulary Review (Leitner flashcards)
+// ---------------------------------------------------------------
+function renderVocabReview() {
+  const el = document.getElementById("view-vocab-review");
+  const due = getDueWords();
+  if (!due.length) {
+    el.innerHTML = `
+      ${backRowHTML("vocabulary", "Vocabulary")}
+      <div class="card center">
+        <div style="font-size:32px;">🎉</div>
+        <p style="font-weight:700; margin-top:8px;">All caught up — nothing due right now.</p>
+      </div>`;
+    wireBackRow(el);
+    return;
+  }
+  renderReviewCard(el, due, 0, { correct: 0 });
+}
+
+function renderReviewCard(el, due, idx, tally) {
+  if (idx >= due.length) {
+    el.innerHTML = `
+      ${backRowHTML("vocabulary", "Vocabulary")}
+      <div class="card center">
+        <div style="font-size:32px;">✨</div>
+        <p style="font-weight:700; margin-top:8px;">Review complete — ${tally.correct}/${due.length} known.</p>
+        <button class="btn btn-primary mt16" id="btn-review-done">Done</button>
+      </div>`;
+    wireBackRow(el);
+    document.getElementById("btn-review-done").onclick = () => switchView("vocabulary");
+    return;
+  }
+  const w = due[idx];
+  let revealed = false;
+
+  function draw() {
+    el.innerHTML = `
+      ${backRowHTML("vocabulary", "Vocabulary")}
+      <div class="small muted center">${idx + 1} / ${due.length}</div>
+      <div class="card center" style="padding:36px 20px;">
+        <button class="icon-btn vocab-speak-btn" data-term="${escapeHTML(w.term)}" style="font-size:22px;">🔊</button>
+        <div style="font-size:22px; font-weight:800; margin-top:8px;">${w.term}</div>
+        ${w.phonetic ? `<div class="small muted">${w.phonetic}</div>` : ""}
+        ${revealed ? `
+          <div class="small muted mt16">${w.translationFa || w.meaning}</div>
+          ${w.example ? `<div class="small mt8" style="font-style:italic; color:var(--primary);">"${w.example}"</div>` : ""}
+        ` : `<button class="btn btn-secondary mt16" id="btn-reveal" style="width:auto; padding:9px 18px;">Show Answer</button>`}
+      </div>
+      ${revealed ? `
+        <div class="copy-row" style="gap:10px;">
+          <button class="btn btn-outline" id="btn-forgot">Didn't know</button>
+          <button class="btn btn-primary" id="btn-knew">Knew it</button>
+        </div>` : ""}
+    `;
+    wireBackRow(el);
+    const speakBtn = el.querySelector(".vocab-speak-btn");
+    if (speakBtn) speakBtn.onclick = () => playPronunciation(w);
+    const revealBtn = document.getElementById("btn-reveal");
+    if (revealBtn) revealBtn.onclick = () => { revealed = true; draw(); };
+    const knewBtn = document.getElementById("btn-knew");
+    if (knewBtn) knewBtn.onclick = () => {
+      reviewWord(w.id, true);
+      renderReviewCard(el, due, idx + 1, { correct: tally.correct + 1 });
+    };
+    const forgotBtn = document.getElementById("btn-forgot");
+    if (forgotBtn) forgotBtn.onclick = () => {
+      reviewWord(w.id, false);
+      renderReviewCard(el, due, idx + 1, tally);
+    };
+  }
+  draw();
 }
 
 // ---------------------------------------------------------------
